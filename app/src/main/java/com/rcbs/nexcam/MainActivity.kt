@@ -86,7 +86,10 @@ data class CameraSettings(
     val protocol: Protocol = Protocol.HTTP_MJPEG,
     val orientation: OrientationMode = OrientationMode.PORTRAIT,
     val lensFacing: Int = CameraSelector.LENS_FACING_BACK,
-    val saverTimeout: Int = 0 
+    val saverTimeout: Int = 0,
+    val serverPort: Int = 8080,
+    val usePassword: Boolean = false,
+    val serverPassword: String = "123456"
 )
 
 @OptIn(ExperimentalCamera2Interop::class)
@@ -124,7 +127,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        sp = getSharedPreferences("pro_settings_vFinal", MODE_PRIVATE)
+        sp = getSharedPreferences("pro_settings_vFinal_v2", MODE_PRIVATE)
         load()
         enableEdgeToEdge()
         setContent { NexCamTheme { Surface { MainContent() } } }
@@ -144,7 +147,10 @@ class MainActivity : ComponentActivity() {
             sp.getBoolean("night", false), sp.getInt("fps", 30),
             Protocol.HTTP_MJPEG, ori,
             sp.getInt("lens", CameraSelector.LENS_FACING_BACK),
-            sp.getInt("saver", 0)
+            sp.getInt("saver", 0),
+            sp.getInt("port", 8080),
+            sp.getBoolean("use_pwd", false),
+            sp.getString("pwd", "123456") ?: "123456"
         )
     }
 
@@ -154,7 +160,8 @@ class MainActivity : ComponentActivity() {
             putString("txt", s.text); putString("res", s.res.name)
             putInt("ev", s.ev); putBoolean("hdr", s.hdr); putBoolean("night", s.night)
             putInt("fps", s.fps); putString("ori", s.orientation.name); putInt("lens", s.lensFacing)
-            putInt("saver", s.saverTimeout)
+            putInt("saver", s.saverTimeout); putInt("port", s.serverPort)
+            putBoolean("use_pwd", s.usePassword); putString("pwd", s.serverPassword)
             apply()
         }
     }
@@ -176,7 +183,7 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        LaunchedEffect(s.saverTimeout) {
+         LaunchedEffect(s.saverTimeout) {
             while (true) {
                 if (s.saverTimeout > 0 && !isSaverActive.value) {
                     if (System.currentTimeMillis() - lastTouchTime > s.saverTimeout * 1000L) {
@@ -276,9 +283,12 @@ class MainActivity : ComponentActivity() {
                             }
                             Text(if (isLive.value) "正在直播" else "IP: $ip", fontWeight = FontWeight.Bold)
                         }
-                        if (isLive.value) Text(liveUrlDisplay.value, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                        if (isLive.value) {
+                            val url = "http://$ip:${s.serverPort}/live" + if (s.usePassword) "?pwd=${s.serverPassword}" else ""
+                            Text(url, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                        }
                         val btnScale by animateFloatAsState(targetValue = if (isLive.value) 1.02f else 1f, animationSpec = spring(), label = "b")
-                        Button(onClick = { if (!isLive.value) { if (ip != "0.0.0.0") { startServer(ip); isLive.value = true; liveUrlDisplay.value = "http://$ip:8080/live" } } else { stopServer(); isLive.value = false } }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).scale(btnScale), colors = if (isLive.value) ButtonDefaults.buttonColors(MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()) { Text(if (isLive.value) "停止服务" else "启动服务") }
+                        Button(onClick = { if (!isLive.value) { if (ip != "0.0.0.0") { startServer(ip); isLive.value = true } } else { stopServer(); isLive.value = false } }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp).scale(btnScale), colors = if (isLive.value) ButtonDefaults.buttonColors(MaterialTheme.colorScheme.error) else ButtonDefaults.buttonColors()) { Text(if (isLive.value) "停止服务" else "启动服务") }
                     }
                 }
             }
@@ -298,6 +308,8 @@ class MainActivity : ComponentActivity() {
         Scaffold(topBar = { TopAppBar(title = { Text("设置") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) } }) }) { p ->
             Column(modifier = Modifier.fillMaxSize().padding(p).padding(16.dp).verticalScroll(scroll)) {
                 val items = listOf<@Composable () -> Unit>(
+                    { SettingRow("端口设置", Icons.Default.Hvac) { TextField(s.serverPort.toString(), { val p = it.toIntOrNull() ?: 8080; val ns = s.copy(serverPort = p); s = ns; save(ns) }, label = { Text("输出端口") }, modifier = Modifier.fillMaxWidth()) } },
+                    { SettingRow("安全验证", Icons.Default.Security) { Column { Row(verticalAlignment = Alignment.CenterVertically) { Text("开启密码"); Switch(s.usePassword, { val ns = s.copy(usePassword = it); s = ns; save(ns) }); Spacer(Modifier.width(16.dp)) }; if (s.usePassword) TextField(s.serverPassword, { val ns = s.copy(serverPassword = it); s = ns; save(ns) }, label = { Text("访问密码") }, modifier = Modifier.fillMaxWidth()) } } },
                     { SettingRow("画面方向", Icons.Default.ScreenRotation) { Row { OrientationMode.entries.forEach { mode -> FilterChip(selected = s.orientation == mode, onClick = { val ns = s.copy(orientation = mode); s = ns; save(ns) }, label = { Text(if (mode == OrientationMode.PORTRAIT) "纵向" else "横向") }, modifier = Modifier.padding(end = 4.dp)) } } } },
                     { SettingRow("分辨率", Icons.Default.AspectRatio) { FlowRow(modifier = Modifier.fillMaxWidth()) { Resolution.entries.forEach { r -> FilterChip(selected = s.res == r, onClick = { if (r == Resolution.R_1080P && s.res != Resolution.R_1080P) { pendingRes = r; showConfirm = true } else { val next = if (r != Resolution.R_1080P && s.fps == 60) 30 else s.fps; val ns = s.copy(res = r, fps = next); s = ns; save(ns) } }, label = { Text(r.name.substring(2)) }, modifier = Modifier.padding(end = 4.dp)) } } } },
                     { SettingRow("帧率 (FPS)", Icons.Default.Speed) { Row { val opts = if (s.res == Resolution.R_1080P) listOf(15, 24, 30, 60) else listOf(15, 24, 30); opts.forEach { f -> FilterChip(selected = s.fps == f, onClick = { val ns = s.copy(fps = f); s = ns; save(ns) }, label = { Text("$f") }, modifier = Modifier.padding(end = 4.dp)) } } } },
@@ -308,7 +320,7 @@ class MainActivity : ComponentActivity() {
                     { SettingToggle("显示水印", Icons.Default.ClosedCaption, s.watermark) { val ns = s.copy(watermark = it); s = ns; save(ns) } },
                     { if (s.watermark) TextField(s.text, { val ns = s.copy(text = it); s = ns; save(ns) }, label = { Text("自定义水印文字") }, modifier = Modifier.fillMaxWidth().animateContentSize()) }
                 )
-                items.forEachIndexed { i, item -> val state = remember { MutableTransitionState(false) }.apply { targetState = true }; AnimatedVisibility(visibleState = state, enter = slideInHorizontally(animationSpec = tween(300, delayMillis = i * 50)) { -40 } + fadeIn(tween(300, delayMillis = i * 50))) { Column { item(); if (i < items.size - 1) HorizontalDivider(Modifier.padding(vertical = 8.dp)) } } }
+                items.forEachIndexed { i, item -> val state = remember { MutableTransitionState(false) }.apply { targetState = true }; AnimatedVisibility(visibleState = state, enter = slideInHorizontally(tween(300, i * 50)) { -40 } + fadeIn(tween(300, i * 50))) { Column { item(); if (i < items.size - 1) HorizontalDivider(Modifier.padding(vertical = 8.dp)) } } }
                 Spacer(Modifier.height(32.dp))
                 Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))) {
                     Column(modifier = Modifier.padding(16.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -351,26 +363,45 @@ class MainActivity : ComponentActivity() {
             if (s.orientation == OrientationMode.PORTRAIT) { if (rot % 180 == 0f) finalRot += 90f } else if (s.orientation == OrientationMode.LANDSCAPE) { if (rot % 180 != 0f) finalRot += 90f }
             val tw = if (finalRot % 180 != 0f) img.height else img.width; val th = if (finalRot % 180 != 0f) img.width else img.height
             synchronized(frameLock) {
-                if (renderBuffer == null || renderBuffer!!.width != tw || renderBuffer!!.height != th) { renderBuffer?.recycle(); renderBuffer = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
-                    renderCanvas = Canvas(renderBuffer!!) }
-                renderCanvas?.apply { val m = Matrix().apply { postRotate(finalRot); val rect = RectF(0f, 0f, img.width.toFloat(), img.height.toFloat()); mapRect(rect); postTranslate(-rect.left, -rect.top) }
-                    drawBitmap(src, m, bitmapPaint)
-                    if (s.watermark) { val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD }
-                        drawText(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()), 30f, th - 30f, tp) } }
+                if (renderBuffer == null || renderBuffer!!.width != tw || renderBuffer!!.height != th) { renderBuffer?.recycle(); renderBuffer = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888); renderCanvas = Canvas(renderBuffer!!) }
+                renderCanvas?.apply { val m = Matrix().apply { postRotate(finalRot); val rect = RectF(0f, 0f, img.width.toFloat(), img.height.toFloat()); mapRect(rect); postTranslate(-rect.left, -rect.top) }; drawBitmap(src, m, bitmapPaint); if (s.watermark) { val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD }; drawText(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()), 30f, th - 30f, tp) } }
                 src.recycle(); previewSurfaceRef?.update(renderBuffer)
-                if (isLive.value) { val baos = ByteArrayOutputStream(); val quality = if (s.fps >= 60) 25 else 45
-                    renderBuffer?.compress(Bitmap.CompressFormat.JPEG, quality, baos); frameFlow.value = baos.toByteArray() }
+                if (isLive.value) { val baos = ByteArrayOutputStream(); val quality = if (s.fps >= 60) 25 else 45; renderBuffer?.compress(Bitmap.CompressFormat.JPEG, quality, baos); frameFlow.value = baos.toByteArray() }
             }
         } catch (e: Exception) {} finally { isProcessing.set(false) }
     }
 
     private fun startServer(ip: String) {
         if (server != null) return
-        server = embeddedServer(Netty, port = 8080, host = "0.0.0.0") {
-            routing { route("/live", HttpMethod.Get) { handle { val body = object : OutgoingContent.WriteChannelContent() { override val contentType = ContentType.parse("multipart/x-mixed-replace; boundary=--frame")
-                            override suspend fun writeTo(channel: ByteWriteChannel) { try { frameFlow.collect { frame -> if (frame != null && isActive) { channel.writeStringUtf8("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n")
-                                            channel.writeFully(frame); channel.writeStringUtf8("\r\n"); channel.flush() } } } catch (e: Exception) {} } }
-                        call.respond(body) } } }
+        val s = settingsState.value
+        server = embeddedServer(Netty, port = s.serverPort, host = "0.0.0.0") {
+            routing {
+                route("/live", HttpMethod.Get) {
+                    handle {
+                        if (s.usePassword) {
+                            val pwd = call.request.queryParameters["pwd"]
+                            if (pwd != s.serverPassword) {
+                                call.respond(HttpStatusCode.Unauthorized, "Password Required or Incorrect. Usage: /live?pwd=your_password")
+                                return@handle
+                            }
+                        }
+                        val body = object : OutgoingContent.WriteChannelContent() {
+                            override val contentType = ContentType.parse("multipart/x-mixed-replace; boundary=--frame")
+                            override suspend fun writeTo(channel: ByteWriteChannel) {
+                                try {
+                                    frameFlow.collect { frame ->
+                                        if (frame != null && isActive) {
+                                            channel.writeStringUtf8("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n")
+                                            channel.writeFully(frame); channel.writeStringUtf8("\r\n"); channel.flush()
+                                        }
+                                    }
+                                } catch (e: Exception) {}
+                            }
+                        }
+                        call.respond(body)
+                    }
+                }
+            }
         }.start(false)
     }
 
