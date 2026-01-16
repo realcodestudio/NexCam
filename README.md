@@ -1,34 +1,34 @@
-# NexCam
+# NexCam Pro
 
-A high-performance Android camera streaming tool built with CameraX and Ktor, supporting real-time image processing and MJPEG streaming over LAN.
+基于 CameraX + Ktor 实现的 Android 高性能摄像头推流工具，支持实时图像处理与局域网 MJPEG 推流。
 
-## Key Features
+## 主要功能
 
-*   **Live Streaming**: Built-in Ktor server for real-time MJPEG video streaming accessible via web browsers.
-*   **Camera Controls**: Manual adjustment of Exposure Compensation (EV) and Zoom.
-*   **Extension Modes**: Support for HDR and Night modes (hardware dependent).
-*   **Image Overlays**: Real-time custom text watermarks and timestamps on the video stream.
-*   **Performance Monitoring**: Live FPS display to monitor capture stability.
-*   **Modern UI**: Built entirely with Jetpack Compose and Material 3, supporting immersive full-screen display.
-*   **Eco Mode**: OLED-friendly black screen saver with anti-burn-in moving text.
+*   **实时推流**：内置 Ktor 服务器，支持通过浏览器实时查看 MJPEG 视频流。
+*   **相机控制**：支持手动调节曝光补偿 (EV) 和变焦 (Zoom)。
+*   **影像增强**：硬件支持下可开启 HDR 和夜景模式。
+*   **图像叠加**：支持在视频流中实时叠加自定义文本水印和时间戳。
+*   **性能监控**：界面实时显示采集 FPS，方便观察推流稳定性。
+*   **丝滑交互**：完全使用 Jetpack Compose 构建，包含页面过渡和组件交互动画。
+*   **省电模式**：针对 OLED 屏幕优化的全黑屏保，支持动态文字防烧屏。
 
-## Tech Stack
+## 技术栈
 
-*   **Language**: Kotlin
-*   **UI Framework**: Jetpack Compose
-*   **Camera API**: CameraX (Core, Camera2, Extensions)
-*   **Networking**: Ktor (Netty)
-*   **Concurrency**: Kotlin Coroutines & Flow
+*   **开发语言**：Kotlin
+*   **UI 框架**：Jetpack Compose (Material 3)
+*   **相机 API**：CameraX (Core, Camera2, Extensions)
+*   **网络框架**：Ktor (Netty)
+*   **异步处理**：Kotlin Coroutines & Flow
 
-## Quick Start
+## 快速开始
 
-1.  Open the project in **Android Studio** and install it on an Android device (API 26+).
-2.  Grant the required Camera and Network permissions.
-3.  (Optional) Tap the settings icon to adjust resolution, watermark, or enable HDR.
-4.  Tap **Start Server**.
-5.  Access the displayed URL (e.g., `http://192.168.x.x:8080/live`) in a browser on the same network.
+1.  使用 **Android Studio** 编译并安装到 Android 设备（API 26+）。
+2.  授予相机和网络相关权限。
+3.  （可选）在设置中调整分辨率、水印或开启 HDR。
+4.  点击 **启动服务**。
+5.  在同一局域网下的浏览器访问显示的地址（如 `http://192.168.x.x:8080/live`）。
 
-## Notes
+## 注意事项
 
-*   Availability of HDR/Night modes depends on the device manufacturer's CameraX Extension implementation.
-*   MJPEG streaming can be CPU and bandwidth intensive at high resolutions; using a stable Wi-Fi connection is recommended.
+*   HDR 和夜景模式是否可用取决于具体设备的硬件支持。
+*   高分辨率推流对 CPU 和带宽有一定要求，建议在稳定的 Wi-Fi 环境下使用。
