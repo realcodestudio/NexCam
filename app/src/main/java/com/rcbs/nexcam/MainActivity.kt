@@ -1,7 +1,9 @@
 package com.rcbs.nexcam
 
+import android.Manifest
 import android.app.Activity
 import android.content.*
+import android.content.pm.PackageManager
 import android.graphics.*
 import android.hardware.camera2.CaptureRequest
 import android.net.wifi.WifiManager
@@ -13,6 +15,7 @@ import android.view.*
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.*
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
@@ -127,7 +130,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        sp = getSharedPreferences("pro_settings_vFinal_v2", MODE_PRIVATE)
+        sp = getSharedPreferences("pro_settings_vFinal_v3", MODE_PRIVATE)
         load()
         enableEdgeToEdge()
         setContent { NexCamTheme { Surface { MainContent() } } }
@@ -171,47 +174,74 @@ class MainActivity : ComponentActivity() {
         var screen by remember { mutableStateOf("cam") }
         val s = settingsState.value
         val view = LocalView.current
-
-        LaunchedEffect(isSaverActive.value) {
-            val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
-            val controller = WindowCompat.getInsetsController(window, view)
-            if (isSaverActive.value) {
-                controller.hide(WindowInsetsCompat.Type.systemBars())
-                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            } else {
-                controller.show(WindowInsetsCompat.Type.systemBars())
-            }
+        val ctx = LocalContext.current
+        
+        // Permission Handling
+        var hasCameraPermission by remember { 
+            mutableStateOf(ContextCompat.checkSelfPermission(ctx, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) 
+        }
+        var showPermissionDeniedDialog by remember { mutableStateOf(false) }
+        
+        val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            hasCameraPermission = granted
+            if (!granted) showPermissionDeniedDialog = true
         }
 
-         LaunchedEffect(s.saverTimeout) {
-            while (true) {
-                if (s.saverTimeout > 0 && !isSaverActive.value) {
-                    if (System.currentTimeMillis() - lastTouchTime > s.saverTimeout * 1000L) {
-                        isSaverActive.value = true
-                    }
+        LaunchedEffect(Unit) {
+            if (!hasCameraPermission) permissionLauncher.launch(Manifest.permission.CAMERA)
+        }
+
+        if (showPermissionDeniedDialog) {
+            AlertDialog(
+                onDismissRequest = { (ctx as Activity).finish() },
+                title = { Text("权限请求") },
+                text = { Text("NexCam 需要相机权限才能正常工作。请在设置中开启权限后重新进入应用。") },
+                confirmButton = { TextButton(onClick = { (ctx as Activity).finish() }) { Text("退出应用") } }
+            )
+        }
+
+        if (hasCameraPermission) {
+            LaunchedEffect(isSaverActive.value) {
+                val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
+                val controller = WindowCompat.getInsetsController(window, view)
+                if (isSaverActive.value) {
+                    controller.hide(WindowInsetsCompat.Type.systemBars())
+                    controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                } else {
+                    controller.show(WindowInsetsCompat.Type.systemBars())
                 }
-                delay(1000)
             }
-        }
 
-        Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
-            detectTapGestures(onPress = { lastTouchTime = System.currentTimeMillis() })
-        }) {
-            AnimatedContent(
-                targetState = screen,
-                transitionSpec = { (fadeIn(tween(400)) + scaleIn(initialScale = 0.95f)).togetherWith(fadeOut(tween(400))) },
-                label = "page"
-            ) { target ->
-                if (target == "cam") CamScreen { screen = "set" }
-                else SetScreen { screen = "cam" }
+            LaunchedEffect(s.saverTimeout) {
+                while (true) {
+                    if (s.saverTimeout > 0 && !isSaverActive.value) {
+                        if (System.currentTimeMillis() - lastTouchTime > s.saverTimeout * 1000L) {
+                            isSaverActive.value = true
+                        }
+                    }
+                    delay(1000)
+                }
             }
-            
-            AnimatedVisibility(visible = isSaverActive.value, enter = fadeIn(tween(800)), exit = fadeOut(tween(500))) {
-                val infiniteTransition = rememberInfiniteTransition(label = "saver")
-                val xBias by infiniteTransition.animateFloat(initialValue = -0.8f, targetValue = 0.8f, animationSpec = infiniteRepeatable(tween(10000, easing = LinearEasing), RepeatMode.Reverse), label = "x")
-                val yBias by infiniteTransition.animateFloat(initialValue = -0.8f, targetValue = 0.8f, animationSpec = infiniteRepeatable(tween(15000, easing = LinearEasing), RepeatMode.Reverse), label = "y")
-                Box(modifier = Modifier.fillMaxSize().background(Color.Black).clickable { isSaverActive.value = false; lastTouchTime = System.currentTimeMillis() }) {
-                    Text(text = "正在后台运行，点击屏幕恢复。", color = Color.Gray.copy(alpha = 0.5f), fontSize = 14.sp, modifier = Modifier.align(BiasAlignment(xBias, yBias)))
+
+            Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+                detectTapGestures(onPress = { lastTouchTime = System.currentTimeMillis() })
+            }) {
+                AnimatedContent(
+                    targetState = screen,
+                    transitionSpec = { (fadeIn(tween(400)) + scaleIn(initialScale = 0.95f)).togetherWith(fadeOut(tween(400))) },
+                    label = "page"
+                ) { target ->
+                    if (target == "cam") CamScreen { screen = "set" }
+                    else SetScreen { screen = "cam" }
+                }
+                
+                AnimatedVisibility(visible = isSaverActive.value, enter = fadeIn(tween(800)), exit = fadeOut(tween(500))) {
+                    val infiniteTransition = rememberInfiniteTransition(label = "saver")
+                    val xBias by infiniteTransition.animateFloat(initialValue = -0.8f, targetValue = 0.8f, animationSpec = infiniteRepeatable(tween(10000, easing = LinearEasing), RepeatMode.Reverse), label = "x")
+                    val yBias by infiniteTransition.animateFloat(initialValue = -0.8f, targetValue = 0.8f, animationSpec = infiniteRepeatable(tween(15000, easing = LinearEasing), RepeatMode.Reverse), label = "y")
+                    Box(modifier = Modifier.fillMaxSize().background(Color.Black).clickable { isSaverActive.value = false; lastTouchTime = System.currentTimeMillis() }) {
+                        Text(text = "正在后台运行，点击屏幕恢复。", color = Color.Gray.copy(alpha = 0.5f), fontSize = 14.sp, modifier = Modifier.align(BiasAlignment(xBias, yBias)))
+                    }
                 }
             }
         }
@@ -308,7 +338,7 @@ class MainActivity : ComponentActivity() {
         Scaffold(topBar = { TopAppBar(title = { Text("设置") }, navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null) } }) }) { p ->
             Column(modifier = Modifier.fillMaxSize().padding(p).padding(16.dp).verticalScroll(scroll)) {
                 val items = listOf<@Composable () -> Unit>(
-                    { SettingRow("端口设置", Icons.Default.Hvac) { TextField(s.serverPort.toString(), { val p = it.toIntOrNull() ?: 8080; val ns = s.copy(serverPort = p); s = ns; save(ns) }, label = { Text("输出端口") }, modifier = Modifier.fillMaxWidth()) } },
+                    { SettingRow("端口设置", Icons.Default.Hvac) { TextField(s.serverPort.toString(), { val p = it.toIntOrNull() ?: 8080; val ns = s.copy(serverPort = p); s = ns; save(ns) }, label = { Text("输出端口 (需重启服务生效)") }, modifier = Modifier.fillMaxWidth()) } },
                     { SettingRow("安全验证", Icons.Default.Security) { Column { Row(verticalAlignment = Alignment.CenterVertically) { Text("开启密码"); Switch(s.usePassword, { val ns = s.copy(usePassword = it); s = ns; save(ns) }); Spacer(Modifier.width(16.dp)) }; if (s.usePassword) TextField(s.serverPassword, { val ns = s.copy(serverPassword = it); s = ns; save(ns) }, label = { Text("访问密码") }, modifier = Modifier.fillMaxWidth()) } } },
                     { SettingRow("画面方向", Icons.Default.ScreenRotation) { Row { OrientationMode.entries.forEach { mode -> FilterChip(selected = s.orientation == mode, onClick = { val ns = s.copy(orientation = mode); s = ns; save(ns) }, label = { Text(if (mode == OrientationMode.PORTRAIT) "纵向" else "横向") }, modifier = Modifier.padding(end = 4.dp)) } } } },
                     { SettingRow("分辨率", Icons.Default.AspectRatio) { FlowRow(modifier = Modifier.fillMaxWidth()) { Resolution.entries.forEach { r -> FilterChip(selected = s.res == r, onClick = { if (r == Resolution.R_1080P && s.res != Resolution.R_1080P) { pendingRes = r; showConfirm = true } else { val next = if (r != Resolution.R_1080P && s.fps == 60) 30 else s.fps; val ns = s.copy(res = r, fps = next); s = ns; save(ns) } }, label = { Text(r.name.substring(2)) }, modifier = Modifier.padding(end = 4.dp)) } } } },
@@ -364,7 +394,10 @@ class MainActivity : ComponentActivity() {
             val tw = if (finalRot % 180 != 0f) img.height else img.width; val th = if (finalRot % 180 != 0f) img.width else img.height
             synchronized(frameLock) {
                 if (renderBuffer == null || renderBuffer!!.width != tw || renderBuffer!!.height != th) { renderBuffer?.recycle(); renderBuffer = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888); renderCanvas = Canvas(renderBuffer!!) }
-                renderCanvas?.apply { val m = Matrix().apply { postRotate(finalRot); val rect = RectF(0f, 0f, img.width.toFloat(), img.height.toFloat()); mapRect(rect); postTranslate(-rect.left, -rect.top) }; drawBitmap(src, m, bitmapPaint); if (s.watermark) { val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD }; drawText(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()), 30f, th - 30f, tp) } }
+                renderCanvas?.apply { val m = Matrix().apply { postRotate(finalRot); val rect = RectF(0f, 0f, img.width.toFloat(), img.height.toFloat()); mapRect(rect); postTranslate(-rect.left, -rect.top) }; drawBitmap(src, m, bitmapPaint); if (s.watermark) { val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD; setShadowLayer(3f, 2f, 2f, android.graphics.Color.BLACK) }
+                        var y = th - 30f
+                        if (s.timestamp) { drawText(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()), 30f, y, tp); y -= (tp.textSize + 10f) }
+                        if (s.text.isNotEmpty()) drawText(s.text, 30f, y, tp) } }
                 src.recycle(); previewSurfaceRef?.update(renderBuffer)
                 if (isLive.value) { val baos = ByteArrayOutputStream(); val quality = if (s.fps >= 60) 25 else 45; renderBuffer?.compress(Bitmap.CompressFormat.JPEG, quality, baos); frameFlow.value = baos.toByteArray() }
             }
@@ -378,10 +411,11 @@ class MainActivity : ComponentActivity() {
             routing {
                 route("/live", HttpMethod.Get) {
                     handle {
-                        if (s.usePassword) {
+                        val currentSettings = settingsState.value
+                        if (currentSettings.usePassword) {
                             val pwd = call.request.queryParameters["pwd"]
-                            if (pwd != s.serverPassword) {
-                                call.respond(HttpStatusCode.Unauthorized, "Password Required or Incorrect. Usage: /live?pwd=your_password")
+                            if (pwd != currentSettings.serverPassword) {
+                                call.respond(HttpStatusCode.Unauthorized, "Password Required or Incorrect.")
                                 return@handle
                             }
                         }
