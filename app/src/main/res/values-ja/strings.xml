@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">NexCam Pro</string>
+    <string name="settings">設定</string>
+    <string name="orientation">方向</string>
+    <string name="resolution">解像度</string>
+    <string name="fps">フレームレート</string>
+    <string name="screen_saver">自動スクリーンセーバー</string>
+    <string name="exposure">露出補正: %1$d</string>
+    <string name="hdr_mode">HDRモード</string>
+    <string name="night_mode">夜間モード</string>
+    <string name="watermark">透かし</string>
+    <string name="watermark_text">透かしテキスト</string>
+    <string name="performance_tip">性能に関するヒント</string>
+    <string name="performance_desc">1080pモードは高いパフォーマンスを要求するため、動作が不安定になったり発熱したりする可能性があります。続行しますか？</string>
+    <string name="continue_btn">続行</string>
+    <string name="cancel_btn">キャンセル</string>
+    <string name="switch_camera">カメラ切り替え</string>
+    <string name="ready">準備完了</string>
+    <string name="live">ライブ配信中</string>
+    <string name="ip_prefix">IP: %1$s</string>
+    <string name="start_server">サーバー開始</string>
+    <string name="stop_server">サーバー停止</string>
+    <string name="saver_text">バックグラウンドで実行中。画面をタップして復帰。</string>
+    <string name="zoom_label">ズーム: %1$.1fx</string>
+    <string name="portrait">縦向き</string>
+    <string name="landscape">横向き</string>
+    <string name="off">オフ</string>
+</resources>

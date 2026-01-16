@@ -1,35 +1,47 @@
 package com.rcbs.nexcam
 
+import android.app.Activity
 import android.content.*
 import android.graphics.*
+import android.hardware.camera2.CaptureRequest
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.util.Log
+import android.util.Range
 import android.util.Size
 import android.view.*
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.*
 import androidx.activity.enableEdgeToEdge
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.*
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.extensions.*
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.animation.core.*
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Sync
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.*
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.rcbs.nexcam.ui.theme.NexCamTheme
 import io.ktor.http.*
@@ -41,21 +53,22 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableStateFlow
 import java.io.ByteArrayOutputStream
 import java.net.*
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import com.google.common.util.concurrent.ListenableFuture
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
-// Explicitly avoid name conflicts by using type aliases
 import androidx.compose.ui.graphics.Color as ComposeColor
 
-enum class Protocol { HTTP_MJPEG, RTSP_PREVIEW, RTMP_PREVIEW }
+enum class Protocol { HTTP_MJPEG }
 enum class Resolution { R_480P, R_720P, R_1080P }
-enum class OrientationMode { AUTO, PORTRAIT, LANDSCAPE }
+enum class OrientationMode { PORTRAIT, LANDSCAPE }
 
 data class CameraSettings(
     val watermark: Boolean = false,
@@ -67,36 +80,42 @@ data class CameraSettings(
     val night: Boolean = false,
     val fps: Int = 30,
     val protocol: Protocol = Protocol.HTTP_MJPEG,
-    val orientation: OrientationMode = OrientationMode.AUTO,
-    val lensFacing: Int = CameraSelector.LENS_FACING_BACK
+    val orientation: OrientationMode = OrientationMode.PORTRAIT,
+    val lensFacing: Int = CameraSelector.LENS_FACING_BACK,
+    val saverTimeout: Int = 0 
 )
 
+@OptIn(ExperimentalCamera2Interop::class)
 class MainActivity : ComponentActivity() {
     private var server: NettyApplicationEngine? = null
-    private var frameData: ByteArray? = null
+    private val frameFlow = MutableStateFlow<ByteArray?>(null)
     private val frameLock = Any()
     private val settingsState = mutableStateOf(CameraSettings())
     private val isLive = mutableStateOf(false)
-    private val liveUrlDisplay = mutableStateOf("Ready")
+    private val liveUrlDisplay = mutableStateOf("准备就绪")
     
+    private val analysisExecutor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors().coerceAtLeast(4))
+    private val isProcessing = AtomicBoolean(false)
+
     private var renderBuffer: Bitmap? = null
     private var renderCanvas: Canvas? = null
-    private val bitmapPaint = Paint().apply {
-        isFilterBitmap = true
-        isAntiAlias = true
-    }
+    private val bitmapPaint = Paint().apply { isFilterBitmap = true; isAntiAlias = false }
     
     private var previewSurfaceRef: PreviewSurface? = null
     private lateinit var sp: SharedPreferences
 
-    // Real-time FPS state
     private val currentFps = mutableIntStateOf(0)
+    private var frameCount = 0
+    private var lastFpsUpdateTime = 0L
     private var lastFrameTime = 0L
 
-    // Zoom state
     private var cameraControl: CameraControl? = null
     private val zoomRatio = mutableFloatStateOf(1f)
     private val zoomRange = mutableStateOf(1f..10f)
+    private val isFlashOn = mutableStateOf(false)
+
+    private val isSaverActive = mutableStateOf(false)
+    private var lastTouchTime = System.currentTimeMillis()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -108,31 +127,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun load() {
+        val oriStr = sp.getString("ori", "PORTRAIT") ?: "PORTRAIT"
+        val ori = try { OrientationMode.valueOf(oriStr) } catch (e: Exception) { OrientationMode.PORTRAIT }
         settingsState.value = CameraSettings(
             sp.getBoolean("wm", false), sp.getBoolean("ts", true),
             sp.getString("txt", "NexCam") ?: "NexCam",
             Resolution.valueOf(sp.getString("res", "R_480P") ?: "R_480P"),
             sp.getInt("ev", 0), sp.getBoolean("hdr", false),
             sp.getBoolean("night", false), sp.getInt("fps", 30),
-            Protocol.valueOf(sp.getString("proto", "HTTP_MJPEG") ?: "HTTP_MJPEG"),
-            OrientationMode.valueOf(sp.getString("ori", "AUTO") ?: "AUTO"),
-            sp.getInt("lens", CameraSelector.LENS_FACING_BACK)
+            Protocol.HTTP_MJPEG, ori,
+            sp.getInt("lens", CameraSelector.LENS_FACING_BACK),
+            sp.getInt("saver", 0)
         )
     }
 
     private fun save(s: CameraSettings) {
         sp.edit().apply {
-            putBoolean("wm", s.watermark)
-            putBoolean("ts", s.timestamp)
-            putString("txt", s.text)
-            putString("res", s.res.name)
-            putInt("ev", s.ev)
-            putBoolean("hdr", s.hdr)
-            putBoolean("night", s.night)
-            putInt("fps", s.fps)
-            putString("proto", s.protocol.name)
-            putString("ori", s.orientation.name)
-            putInt("lens", s.lensFacing)
+            putBoolean("wm", s.watermark); putBoolean("ts", s.timestamp)
+            putString("txt", s.text); putString("res", s.res.name)
+            putInt("ev", s.ev); putBoolean("hdr", s.hdr); putBoolean("night", s.night)
+            putInt("fps", s.fps); putString("ori", s.orientation.name); putInt("lens", s.lensFacing)
+            putInt("saver", s.saverTimeout)
             apply()
         }
     }
@@ -140,8 +155,63 @@ class MainActivity : ComponentActivity() {
     @Composable
     fun MainContent() {
         var screen by remember { mutableStateOf("cam") }
-        if (screen == "cam") CamScreen { screen = "set" }
-        else SetScreen { screen = "cam" }
+        val s = settingsState.value
+        val view = LocalView.current
+
+        LaunchedEffect(isSaverActive.value) {
+            val window = (view.context as? Activity)?.window ?: return@LaunchedEffect
+            val controller = WindowCompat.getInsetsController(window, view)
+            if (isSaverActive.value) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+
+        LaunchedEffect(s.saverTimeout) {
+            while (true) {
+                if (s.saverTimeout > 0 && !isSaverActive.value) {
+                    if (System.currentTimeMillis() - lastTouchTime > s.saverTimeout * 1000L) {
+                        isSaverActive.value = true
+                    }
+                }
+                delay(1000)
+            }
+        }
+
+        Box(modifier = Modifier.fillMaxSize().pointerInput(Unit) {
+            detectTapGestures(onPress = { lastTouchTime = System.currentTimeMillis() })
+        }) {
+            if (screen == "cam") CamScreen { screen = "set" }
+            else SetScreen { screen = "cam" }
+            
+            if (isSaverActive.value) {
+                val infiniteTransition = rememberInfiniteTransition(label = "saver")
+                val xBias by infiniteTransition.animateFloat(
+                    initialValue = -0.8f, targetValue = 0.8f,
+                    animationSpec = infiniteRepeatable(tween(10000, easing = LinearEasing), RepeatMode.Reverse), label = "x"
+                )
+                val yBias by infiniteTransition.animateFloat(
+                    initialValue = -0.8f, targetValue = 0.8f,
+                    animationSpec = infiniteRepeatable(tween(15000, easing = LinearEasing), RepeatMode.Reverse), label = "y"
+                )
+
+                Box(
+                    modifier = Modifier.fillMaxSize().background(Color.Black).clickable { 
+                        isSaverActive.value = false
+                        lastTouchTime = System.currentTimeMillis()
+                    }
+                ) {
+                    Text(
+                        text = "正在后台运行，点击屏幕恢复。",
+                        color = Color.Gray.copy(alpha = 0.5f),
+                        fontSize = 14.sp,
+                        modifier = Modifier.align(BiasAlignment(xBias, yBias))
+                    )
+                }
+            }
+        }
         BackHandler(screen == "set") { screen = "cam" }
     }
 
@@ -151,9 +221,8 @@ class MainActivity : ComponentActivity() {
         val ctx = LocalContext.current
         val owner = LocalLifecycleOwner.current
         val s = settingsState.value
-        val executor = remember { Executors.newSingleThreadExecutor() }
 
-        LaunchedEffect(s.res, s.hdr, s.night, s.lensFacing) {
+        LaunchedEffect(s.res, s.hdr, s.night, s.lensFacing, s.fps) {
             try {
                 val provider = awaitListenableFuture(ProcessCameraProvider.getInstance(ctx))
                 val extManager = awaitListenableFuture(ExtensionsManager.getInstanceAsync(ctx, provider))
@@ -164,24 +233,21 @@ class MainActivity : ComponentActivity() {
                     Resolution.R_1080P -> Size(1920, 1080)
                 }
 
-                val resSelector = ResolutionSelector.Builder()
-                    .setResolutionStrategy(ResolutionStrategy(targetSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER))
-                    .build()
+                val analysisBuilder = ImageAnalysis.Builder()
+                    .setResolutionSelector(ResolutionSelector.Builder().setResolutionStrategy(ResolutionStrategy(targetSize, ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER)).build())
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
 
-                synchronized(frameLock) {
-                    renderBuffer?.recycle()
-                    renderBuffer = null
+                if (s.fps > 30) {
+                    val minFps = if (s.res == Resolution.R_1080P) 15 else 30
+                    Camera2Interop.Extender(analysisBuilder)
+                        .setCaptureRequestOption(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(minFps, s.fps))
                 }
 
-                val analysis = ImageAnalysis.Builder()
-                    .setResolutionSelector(resSelector)
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                
-                analysis.setAnalyzer(executor) { img -> processImage(img); img.close() }
+                val analysis = analysisBuilder.build()
+                analysis.setAnalyzer(analysisExecutor) { img -> processImage(img); img.close() }
                 
                 var sel = CameraSelector.Builder().requireLensFacing(s.lensFacing).build()
-                
                 if (s.hdr && extManager.isExtensionAvailable(sel, ExtensionMode.HDR)) {
                     sel = extManager.getExtensionEnabledCameraSelector(sel, ExtensionMode.HDR)
                 } else if (s.night && extManager.isExtensionAvailable(sel, ExtensionMode.NIGHT)) {
@@ -191,14 +257,16 @@ class MainActivity : ComponentActivity() {
                 provider.unbindAll()
                 val cam = provider.bindToLifecycle(owner, sel, analysis)
                 cameraControl = cam.cameraControl
-                
                 cam.cameraInfo.zoomState.observe(owner) { state ->
                     zoomRatio.floatValue = state.zoomRatio
                     zoomRange.value = state.minZoomRatio..state.maxZoomRatio
                 }
-                
                 cameraControl?.setExposureCompensationIndex(s.ev)
-            } catch (e: Exception) { Log.e("NexCam", "Camera Error", e) }
+                cameraControl?.enableTorch(isFlashOn.value)
+            } catch (e: Exception) { 
+                Log.e("NexCam", "Camera Rebind Error", e)
+                if (s.fps > 30) settingsState.value = s.copy(fps = 30)
+            }
         }
 
         Scaffold(
@@ -207,84 +275,48 @@ class MainActivity : ComponentActivity() {
                     title = { Text("NexCam Pro") }, 
                     actions = {
                         IconButton(onClick = {
-                            val newFacing = if (s.lensFacing == CameraSelector.LENS_FACING_BACK) 
-                                CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-                            val ns = s.copy(lensFacing = newFacing)
-                            settingsState.value = ns
-                            save(ns)
+                            val nextFlash = !isFlashOn.value
+                            isFlashOn.value = nextFlash
+                            cameraControl?.enableTorch(nextFlash)
                         }) {
-                            Icon(Icons.Default.Sync, contentDescription = "Switch Camera")
+                            Icon(if (isFlashOn.value) Icons.Default.FlashOn else Icons.Default.FlashOff, contentDescription = "闪光灯")
                         }
+                        IconButton(onClick = {
+                            val newFacing = if (s.lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                            val ns = s.copy(lensFacing = newFacing)
+                            settingsState.value = ns; save(ns)
+                        }) { Icon(Icons.Default.Sync, contentDescription = "切换摄像头") }
                         IconButton(onClick = onSet) { Icon(Icons.Default.Settings, null) }
                     }
                 ) 
             }
         ) { p ->
             Box(modifier = Modifier.fillMaxSize().padding(p)) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth().background(ComposeColor.Black)) {
-                        AndroidView(factory = { context -> PreviewSurface(context).also { previewSurfaceRef = it } }, modifier = Modifier.fillMaxSize())
-                        
-                        // Floating FPS Overlay
-                        Surface(
-                            modifier = Modifier.padding(16.dp).align(Alignment.TopStart),
-                            color = ComposeColor.Black.copy(alpha = 0.6f),
-                            shape = RoundedCornerShape(8.dp)
-                        ) {
-                            Text(
-                                text = "FPS: ${currentFps.intValue}",
-                                color = ComposeColor.Green,
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                        }
-
-                        // Zoom Slider
-                        Column(
-                            modifier = Modifier
-                                .align(Alignment.BottomCenter)
-                                .padding(bottom = 32.dp)
-                                .width(200.dp)
-                                .background(ComposeColor.Black.copy(alpha = 0.4f), RoundedCornerShape(16.dp))
-                                .padding(horizontal = 16.dp, vertical = 8.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(text = "Zoom: ${String.format("%.1fx", zoomRatio.floatValue)}", color = ComposeColor.White, fontSize = 10.sp)
-                            Slider(
-                                value = zoomRatio.floatValue,
-                                onValueChange = { 
-                                    zoomRatio.floatValue = it
-                                    cameraControl?.setZoomRatio(it)
-                                },
-                                valueRange = zoomRange.value,
-                                modifier = Modifier.height(20.dp)
-                            )
-                        }
-                    }
-                    Card(modifier = Modifier.padding(16.dp).fillMaxWidth()) {
-                        Column(
-                            modifier = Modifier.padding(16.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            val ip = getIP(ctx)
-                            Text(if (isLive.value) "LIVE: ${s.protocol}" else "IP: $ip", fontWeight = FontWeight.Bold)
-                            if (isLive.value) Text(liveUrlDisplay.value, color = MaterialTheme.colorScheme.primary)
-                            Button(onClick = {
-                                if (!isLive.value) {
-                                    if (ip != "0.0.0.0") { 
-                                        startServer(ip)
-                                        isLive.value = true
-                                        val prefix = when(s.protocol) {
-                                            Protocol.HTTP_MJPEG -> "http"
-                                            Protocol.RTSP_PREVIEW -> "rtsp"
-                                            Protocol.RTMP_PREVIEW -> "rtmp"
-                                        }
-                                        liveUrlDisplay.value = "$prefix://$ip:8080/live"
-                                    }
-                                } else { stopServer(); isLive.value = false }
-                            }, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) { Text(if (isLive.value) "Stop Monitoring" else "Start Server") }
-                        }
+                AndroidView(factory = { context -> PreviewSurface(context).also { previewSurfaceRef = it } }, modifier = Modifier.fillMaxSize())
+                Surface(
+                    modifier = Modifier.padding(16.dp).align(Alignment.TopStart),
+                    color = ComposeColor.Black.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(text = "FPS: ${currentFps.intValue}", color = ComposeColor.Green, modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Column(
+                    modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 32.dp).width(200.dp).background(ComposeColor.Black.copy(alpha = 0.4f), RoundedCornerShape(16.dp)).padding(horizontal = 16.dp, vertical = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(text = "变焦: ${String.format("%.1fx", zoomRatio.floatValue)}", color = ComposeColor.White, fontSize = 10.sp)
+                    Slider(value = zoomRatio.floatValue, onValueChange = { zoomRatio.floatValue = it; cameraControl?.setZoomRatio(it) }, valueRange = zoomRange.value, modifier = Modifier.height(20.dp))
+                }
+                Card(modifier = Modifier.align(Alignment.BottomCenter).padding(horizontal = 16.dp, vertical = 100.dp).fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        val ip = getIP(ctx)
+                        Text(if (isLive.value) "正在直播" else "IP: $ip", fontWeight = FontWeight.Bold)
+                        if (isLive.value) Text(liveUrlDisplay.value, color = MaterialTheme.colorScheme.primary)
+                        Button(onClick = {
+                            if (!isLive.value) {
+                                if (ip != "0.0.0.0") { startServer(ip); isLive.value = true; liveUrlDisplay.value = "http://$ip:8080/live" }
+                            } else { stopServer(); isLive.value = false }
+                        }, modifier = Modifier.fillMaxWidth()) { Text(if (isLive.value) "停止服务" else "启动服务") }
                     }
                 }
             }
@@ -296,47 +328,98 @@ class MainActivity : ComponentActivity() {
     fun SetScreen(onBack: () -> Unit) {
         var s by settingsState
         val scroll = rememberScrollState()
-        Scaffold(topBar = { TopAppBar(title = { Text("Settings") }, navigationIcon = { IconButton(onClick = onBack) { Text("←") } }) }) { p ->
+        var showConfirm by remember { mutableStateOf(false) }
+        var pendingRes by remember { mutableStateOf<Resolution?>(null) }
+
+        if (showConfirm) {
+            AlertDialog(
+                onDismissRequest = { showConfirm = false },
+                title = { Text("性能提示") },
+                text = { Text("1080p 模式对设备性能要求大，可能导致运行不稳定或发热。是否继续？") },
+                confirmButton = { TextButton(onClick = { 
+                    pendingRes?.let { r ->
+                        val ns = s.copy(res = r)
+                        s = ns; save(ns)
+                    }
+                    showConfirm = false 
+                }) { Text("继续") } },
+                dismissButton = { TextButton(onClick = { showConfirm = false }) { Text("取消") } }
+            )
+        }
+
+        Scaffold(topBar = { TopAppBar(title = { Text("设置") }, navigationIcon = { IconButton(onClick = onBack) { Text("←") } }) }) { p ->
             Column(modifier = Modifier.fillMaxSize().padding(p).padding(16.dp).verticalScroll(scroll)) {
-                Text("Output Orientation", color = MaterialTheme.colorScheme.primary)
+                Text("画面方向", color = MaterialTheme.colorScheme.primary); Row { 
+                    OrientationMode.entries.forEach { mode -> 
+                        val label = if (mode == OrientationMode.PORTRAIT) "纵向" else "横向"
+                        FilterChip(selected = s.orientation == mode, onClick = { val ns = s.copy(orientation = mode); s = ns; save(ns) }, label = { Text(label) }, modifier = Modifier.padding(end = 4.dp)) 
+                    } 
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                
+                Text("分辨率", color = MaterialTheme.colorScheme.primary); Row { Resolution.entries.forEach { r -> 
+                    FilterChip(selected = s.res == r, onClick = { 
+                        if (r == Resolution.R_1080P && s.res != Resolution.R_1080P) {
+                            pendingRes = r; showConfirm = true
+                        } else {
+                            var nextFps = s.fps
+                            if (r != Resolution.R_1080P && s.fps == 60) nextFps = 30
+                            val ns = s.copy(res = r, fps = nextFps); s = ns; save(ns) 
+                        }
+                    }, label = { Text(r.name.substring(2)) }, modifier = Modifier.padding(end = 4.dp)) 
+                } }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                
+                Text("帧率 (FPS)", color = MaterialTheme.colorScheme.primary); Row { 
+                    val fpsOptions = if (s.res == Resolution.R_1080P) listOf(15, 24, 30, 60) else listOf(15, 24, 30)
+                    fpsOptions.forEach { f -> FilterChip(selected = s.fps == f, onClick = { val ns = s.copy(fps = f); s = ns; save(ns) }, label = { Text("$f") }, modifier = Modifier.padding(end = 4.dp)) } 
+                }
+                HorizontalDivider(Modifier.padding(vertical = 8.dp))
+                
+                Text("自动屏保 (OLED省电)", color = MaterialTheme.colorScheme.primary)
                 Row(modifier = Modifier.horizontalScroll(rememberScrollState())) {
-                    OrientationMode.entries.forEach { mode ->
-                        FilterChip(selected = s.orientation == mode, onClick = { val ns = s.copy(orientation = mode); s = ns; save(ns) }, label = { Text(mode.name) }, modifier = Modifier.padding(end = 4.dp))
+                    val options = listOf(0 to "关闭", 15 to "15秒", 30 to "30秒", 60 to "1分钟", 300 to "5分钟")
+                    options.forEach { (valSec, label) ->
+                        FilterChip(selected = s.saverTimeout == valSec, onClick = { val ns = s.copy(saverTimeout = valSec); s = ns; save(ns) }, label = { Text(label) }, modifier = Modifier.padding(end = 4.dp))
                     }
                 }
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("Protocol", color = MaterialTheme.colorScheme.primary); Protocol.entries.forEach { proto -> Row(verticalAlignment = Alignment.CenterVertically) { RadioButton(s.protocol == proto, { val ns = s.copy(protocol = proto); s = ns; save(ns) }); Text(proto.name) } }
+
+                Text("曝光补偿: ${s.ev}", color = MaterialTheme.colorScheme.primary)
+                Slider(value = s.ev.toFloat(), onValueChange = { val ns = s.copy(ev = it.toInt()); s = ns; save(ns); cameraControl?.setExposureCompensationIndex(ns.ev) }, valueRange = -4f..4f, steps = 8)
                 HorizontalDivider(Modifier.padding(vertical = 8.dp))
-                Text("Resolution", color = MaterialTheme.colorScheme.primary); Row(modifier = Modifier.horizontalScroll(rememberScrollState())) { Resolution.entries.forEach { r -> FilterChip(selected = s.res == r, onClick = { val ns = s.copy(res = r); s = ns; save(ns) }, label = { Text(r.name.substring(2)) }, modifier = Modifier.padding(end = 4.dp)) } }
-                Spacer(modifier = Modifier.height(8.dp)); Text("FPS"); Row(modifier = Modifier.horizontalScroll(rememberScrollState())) { listOf(15, 24, 30, 60).forEach { f -> FilterChip(selected = s.fps == f, onClick = { val ns = s.copy(fps = f); s = ns; save(ns) }, label = { Text("$f") }, modifier = Modifier.padding(end = 4.dp)) } }
-                Spacer(modifier = Modifier.height(8.dp)); Text("Exposure: ${s.ev}"); Slider(s.ev.toFloat(), { val ns = s.copy(ev = it.toInt()); s = ns; save(ns) }, valueRange = -4f..4f, steps = 8)
-                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("HDR Mode"); Switch(s.hdr, { val ns = s.copy(hdr = it, night = false); s = ns; save(ns) }) }
-                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("Night Mode"); Switch(s.night, { val ns = s.copy(night = it, hdr = false); s = ns; save(ns) }) }
-                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("Watermark"); Switch(s.watermark, { val ns = s.copy(watermark = it); s = ns; save(ns) }) }
-                if (s.watermark) TextField(s.text, { val ns = s.copy(text = it); s = ns; save(ns) }, label = { Text("Text") }, modifier = Modifier.fillMaxWidth())
+                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("HDR 模式"); Switch(s.hdr, { val ns = s.copy(hdr = it, night = false); s = ns; save(ns) }) }
+                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("夜景模式"); Switch(s.night, { val ns = s.copy(night = it, hdr = false); s = ns; save(ns) }) }
+                Row(modifier = Modifier.fillMaxWidth(), Arrangement.SpaceBetween, Alignment.CenterVertically) { Text("显示水印"); Switch(s.watermark, { val ns = s.copy(watermark = it); s = ns; save(ns) }) }
+                if (s.watermark) TextField(s.text, { val ns = s.copy(text = it); s = ns; save(ns) }, label = { Text("自定义水印文字") }, modifier = Modifier.fillMaxWidth())
             }
         }
     }
 
     private fun processImage(img: ImageProxy) {
+        val s = settingsState.value
+        val now = System.currentTimeMillis()
+        if (now - lastFrameTime < (1000L / s.fps) - 2) return
+        if (!isProcessing.compareAndSet(false, true)) return
+
         try {
-            // Update FPS Calculation
-            val now = System.currentTimeMillis()
-            if (lastFrameTime > 0) {
-                val diff = now - lastFrameTime
-                if (diff > 0) currentFps.intValue = (1000 / diff).toInt()
+            frameCount++
+            if (now - lastFpsUpdateTime > 1000) {
+                currentFps.intValue = frameCount
+                frameCount = 0
+                lastFpsUpdateTime = now
             }
             lastFrameTime = now
 
             val src = img.toBitmap()
             val rot = img.imageInfo.rotationDegrees.toFloat()
-            val s = settingsState.value
-            
             var finalRot = rot
-            if (s.orientation == OrientationMode.PORTRAIT) { if (rot % 180 == 0f) finalRot += 90f } 
+            if (s.orientation == OrientationMode.PORTRAIT) { if (rot % 180 == 0f) finalRot += 90f }
             else if (s.orientation == OrientationMode.LANDSCAPE) { if (rot % 180 != 0f) finalRot += 90f }
+            
             val tw = if (finalRot % 180 != 0f) img.height else img.width
             val th = if (finalRot % 180 != 0f) img.width else img.height
+
             synchronized(frameLock) {
                 if (renderBuffer == null || renderBuffer!!.width != tw || renderBuffer!!.height != th) {
                     renderBuffer?.recycle(); renderBuffer = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
@@ -350,40 +433,41 @@ class MainActivity : ComponentActivity() {
                     }
                     drawBitmap(src, m, bitmapPaint)
                     if (s.watermark) {
-                        val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD; setShadowLayer(3f, 2f, 2f, android.graphics.Color.BLACK) }
-                        var y = th - 30f
-                        if (s.timestamp) { drawText(SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date()), 30f, y, tp); y -= (tp.textSize + 10f) }
-                        if (s.text.isNotEmpty()) drawText(s.text, 30f, y, tp)
+                        val tp = Paint().apply { color = android.graphics.Color.WHITE; textSize = tw / 20f; typeface = Typeface.DEFAULT_BOLD }
+                        drawText(SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()), 30f, th - 30f, tp)
                     }
                 }
-                src.recycle(); previewSurfaceRef?.update(renderBuffer)
-                val baos = ByteArrayOutputStream()
-                val quality = if (s.res == Resolution.R_1080P) 70 else 40
-                renderBuffer?.compress(Bitmap.CompressFormat.JPEG, quality, baos)
-                frameData = baos.toByteArray()
+                src.recycle()
+                previewSurfaceRef?.update(renderBuffer)
+
+                if (isLive.value) {
+                    val baos = ByteArrayOutputStream()
+                    val quality = if (s.fps >= 60) 25 else 45
+                    renderBuffer?.compress(Bitmap.CompressFormat.JPEG, quality, baos)
+                    frameFlow.value = baos.toByteArray()
+                }
             }
-        } catch (e: OutOfMemoryError) { System.gc() }
+        } catch (e: Exception) { Log.e("NexCam", "Process error", e) } finally {
+            isProcessing.set(false)
+        }
     }
 
     private fun startServer(ip: String) {
         if (server != null) return
-        val currentSettings = settingsState.value
         server = embeddedServer(Netty, port = 8080, host = "0.0.0.0") {
             routing {
                 route("/live", HttpMethod.Get) {
                     handle {
-                        val body: OutgoingContent = object : OutgoingContent.WriteChannelContent() {
+                        val body = object : OutgoingContent.WriteChannelContent() {
                             override val contentType = ContentType.parse("multipart/x-mixed-replace; boundary=--frame")
                             override suspend fun writeTo(channel: ByteWriteChannel) {
                                 try {
-                                    while (isActive) {
-                                        val frame = synchronized(frameLock) { frameData }
-                                        if (frame != null) {
+                                    frameFlow.collect { frame ->
+                                        if (frame != null && isActive) {
                                             channel.writeStringUtf8("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: ${frame.size}\r\n\r\n")
                                             channel.writeFully(frame)
                                             channel.writeStringUtf8("\r\n"); channel.flush()
                                         }
-                                        delay(1000L / currentSettings.fps)
                                     }
                                 } catch (e: Exception) {}
                             }
@@ -403,51 +487,35 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             val ip = wm.connectionInfo.ipAddress
             if (ip != 0) return String.format("%d.%d.%d.%d", ip and 0xff, ip shr 8 and 0xff, ip shr 16 and 0xff, ip shr 24 and 0xff)
-            val en = NetworkInterface.getNetworkInterfaces()
-            while (en.hasMoreElements()) {
-                val itf = en.nextElement()
-                if (itf.name.contains("wlan") || itf.name.contains("ap") || itf.name.contains("eth")) {
-                    val addrs = itf.inetAddresses
-                    while (addrs.hasMoreElements()) {
-                        val a = addrs.nextElement()
-                        if (!a.isLoopbackAddress && a is Inet4Address) return a.hostAddress ?: "0.0.0.0"
-                    }
-                }
-            }
         } catch (e: Exception) {}
         return "0.0.0.0"
     }
 
-    override fun onDestroy() { super.onDestroy(); stopServer() }
+    override fun onDestroy() { super.onDestroy(); stopServer(); analysisExecutor.shutdown() }
 
     private suspend fun <T> awaitListenableFuture(future: ListenableFuture<T>): T = suspendCancellableCoroutine { cont ->
-        future.addListener({
-            try {
-                val result = (future as ListenableFuture<T>).get()
-                cont.resume(result)
-            } catch (e: Exception) {
-                cont.resumeWithException(e)
-            }
-        }, ContextCompat.getMainExecutor(this@MainActivity))
+        future.addListener({ try { cont.resume((future as ListenableFuture<T>).get()) } catch (e: Exception) { cont.resumeWithException(e) } }, ContextCompat.getMainExecutor(this))
     }
 }
 
 class PreviewSurface(context: Context) : SurfaceView(context), SurfaceHolder.Callback {
+    private var isSurfaceAvailable = false
     init { holder.addCallback(this) }
-    override fun surfaceCreated(h: SurfaceHolder) {}
+    override fun surfaceCreated(h: SurfaceHolder) { isSurfaceAvailable = true }
     override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hi: Int) {}
-    override fun surfaceDestroyed(h: SurfaceHolder) {}
+    override fun surfaceDestroyed(h: SurfaceHolder) { isSurfaceAvailable = false }
     fun update(bitmap: Bitmap?) {
+        if (!isSurfaceAvailable) return
         val canvas = holder.lockCanvas() ?: return
         try {
             bitmap?.let {
-                val src = Rect(0, 0, it.width, it.height)
                 val scale = (canvas.width.toFloat() / it.width).coerceAtMost(canvas.height.toFloat() / it.height)
                 val nw = (it.width * scale).toInt(); val nh = (it.height * scale).toInt()
-                val left = (canvas.width - nw) / 2; val top = (canvas.height - nh) / 2
                 canvas.drawColor(android.graphics.Color.BLACK)
-                canvas.drawBitmap(it, src, Rect(left, top, left + nw, top + nh), null)
+                canvas.drawBitmap(it, null, Rect((canvas.width - nw) / 2, (canvas.height - nh) / 2, (canvas.width + nw) / 2, (canvas.height + nh) / 2), null)
             }
-        } finally { holder.unlockCanvasAndPost(canvas) }
+        } catch (e: Exception) {} finally { 
+            try { holder.unlockCanvasAndPost(canvas) } catch (e: Exception) {}
+        }
     }
 }

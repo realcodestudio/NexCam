@@ -1,0 +1,28 @@
+<resources>
+    <string name="app_name">NexCam Pro</string>
+    <string name="settings">设置</string>
+    <string name="orientation">方向</string>
+    <string name="resolution">分辨率</string>
+    <string name="fps">帧率</string>
+    <string name="screen_saver">自动屏保</string>
+    <string name="exposure">曝光补偿: %1$d</string>
+    <string name="hdr_mode">HDR 模式</string>
+    <string name="night_mode">夜景模式</string>
+    <string name="watermark">水印</string>
+    <string name="watermark_text">水印文字</string>
+    <string name="performance_tip">性能提示</string>
+    <string name="performance_desc">1080p 模式对设备性能要求大，可能导致运行不稳定或发热。是否继续？</string>
+    <string name="continue_btn">继续</string>
+    <string name="cancel_btn">取消</string>
+    <string name="switch_camera">切换摄像头</string>
+    <string name="ready">准备就绪</string>
+    <string name="live">正在直播</string>
+    <string name="ip_prefix">IP: %1$s</string>
+    <string name="start_server">启动服务</string>
+    <string name="stop_server">停止服务</string>
+    <string name="saver_text">正在后台运行，点击屏幕恢复。</string>
+    <string name="zoom_label">变焦: %1$.1fx</string>
+    <string name="portrait">纵向</string>
+    <string name="landscape">横向</string>
+    <string name="off">关闭</string>
+</resources>
